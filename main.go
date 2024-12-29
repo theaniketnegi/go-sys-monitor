@@ -10,6 +10,7 @@ import (
 	"github.com/charmbracelet/bubbles/progress"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/shirou/gopsutil/cpu"
+	"github.com/shirou/gopsutil/disk"
 	"github.com/shirou/gopsutil/mem"
 )
 
@@ -27,6 +28,8 @@ type SystemMetrics struct {
 }
 
 type CPUMetrics struct {
+	modelName    string
+	frequency    float64
 	totalCPU     int
 	logicalCPU   int
 	percentUsage []float64
@@ -37,16 +40,36 @@ type MemoryMetrics struct {
 	memoryTotal uint64
 }
 
+type DiskMetrics struct {
+	mountedPartitions []MountedPartitionMetrics
+}
+
+type MountedPartitionMetrics struct {
+	devName    string
+	mountPoint string
+	fsType     string
+	freeDisk   uint64
+	usedDisk   uint64
+	totalDisk  uint64
+}
+
 const (
-	CPU_TITLE = "CPU Metrics"
-	MEM_TITLE = "Memory Metrics"
+	CPU_TITLE  = "CPU Metrics"
+	MEM_TITLE  = "Memory Metrics"
+	DISK_TITLE = "Disk metrics"
 )
 
 func GetCPUMetrics() (CPUMetrics, error) {
+	stat, err := cpu.Info()
+	if err != nil {
+		return CPUMetrics{}, err
+	}
+
 	total, err := cpu.Counts(true)
 	if err != nil {
 		return CPUMetrics{}, err
 	}
+
 	logical, err := cpu.Counts(false)
 	if err != nil {
 		return CPUMetrics{}, err
@@ -56,7 +79,8 @@ func GetCPUMetrics() (CPUMetrics, error) {
 	if err != nil {
 		return CPUMetrics{}, err
 	}
-	return CPUMetrics{totalCPU: total, logicalCPU: logical, percentUsage: v}, nil
+
+	return CPUMetrics{modelName: stat[0].ModelName, frequency: stat[0].Mhz, totalCPU: total, logicalCPU: logical, percentUsage: v}, nil
 }
 
 func GetMemMetrics() (MemoryMetrics, error) {
@@ -65,6 +89,25 @@ func GetMemMetrics() (MemoryMetrics, error) {
 		return MemoryMetrics{}, err
 	}
 	return MemoryMetrics{memoryUsed: v.Used, memoryTotal: v.Total}, nil
+}
+
+func GetDiskMetrics() (DiskMetrics, error) {
+	partitions, err := disk.Partitions(false)
+
+	if err != nil {
+		return DiskMetrics{}, err
+	}
+
+	var partitionMetrics []MountedPartitionMetrics
+	for _, partition := range partitions {
+		stat, err := disk.Usage(partition.Mountpoint)
+		if err != nil {
+			continue
+		}
+		partitionMetrics = append(partitionMetrics, MountedPartitionMetrics{devName: partition.Device, mountPoint: partition.Mountpoint, fsType: partition.Fstype, freeDisk: stat.Free, usedDisk: stat.Used, totalDisk: stat.Total})
+	}
+
+	return DiskMetrics{partitionMetrics}, nil
 }
 
 func doTick() tea.Cmd {
@@ -96,6 +139,7 @@ func initialModel() model {
 
 	memProgress := NewProgress()
 
+	GetDiskMetrics()
 	return model{
 		sys:         SystemMetrics{cpu: initCpu, memory: initMem},
 		cpuProgress: cpuProgress,
@@ -147,6 +191,8 @@ func (m model) View() string {
 	s += CPU_TITLE + "\n"
 	s += strings.Repeat("#", len(CPU_TITLE))
 	s += "\n\n"
+	s += fmt.Sprintf("Model Name: %s\n", m.sys.cpu.modelName)
+	s += fmt.Sprintf("Frequency: %.2fMHz\n", m.sys.cpu.frequency)
 	s += fmt.Sprintf("Total CPU: %d (%d Logical)\n", m.sys.cpu.totalCPU, m.sys.cpu.logicalCPU)
 
 	for i, per := range m.sys.cpu.percentUsage {
