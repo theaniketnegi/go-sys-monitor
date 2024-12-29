@@ -4,11 +4,14 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/charmbracelet/bubbles/progress"
+	"github.com/charmbracelet/bubbles/table"
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
 	"github.com/shirou/gopsutil/cpu"
 	"github.com/shirou/gopsutil/disk"
 	"github.com/shirou/gopsutil/mem"
@@ -16,15 +19,23 @@ import (
 
 type tickMsg time.Time
 
+var baseStyle = lipgloss.NewStyle().
+	BorderStyle(lipgloss.NormalBorder()).
+	BorderForeground(lipgloss.Color("240"))
+
+var boldPinkStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#FF7CCB")).Bold(true)
+
 type model struct {
 	sys         SystemMetrics
 	cpuProgress []progress.Model
 	memProgress progress.Model
+	diskTable   table.Model
 }
 
 type SystemMetrics struct {
 	cpu    CPUMetrics
 	memory MemoryMetrics
+	disk   DiskMetrics
 }
 
 type CPUMetrics struct {
@@ -54,6 +65,15 @@ type MountedPartitionMetrics struct {
 }
 
 const (
+	TITLE = `
+                      _                                        (_)   _                 
+  ___  _   _   ___  _| |_  _____  ____     ____    ___   ____   _  _| |_   ___    ____ 
+ /___)| | | | /___)(_   _)| ___ ||    \   |    \  / _ \ |  _ \ | |(_   _) / _ \  / ___)
+|___ || |_| ||___ |  | |_ | ____|| | | |  | | | || |_| || | | || |  | |_ | |_| || |    
+(___/  \__  |(___/    \__)|_____)|_|_|_|  |_|_|_| \___/ |_| |_||_|   \__) \___/ |_|    
+      (____/                                                                           
+
+	`
 	CPU_TITLE  = "CPU Metrics"
 	MEM_TITLE  = "Memory Metrics"
 	DISK_TITLE = "Disk metrics"
@@ -120,6 +140,29 @@ func NewProgress() progress.Model {
 	return progress.New(progress.WithScaledGradient("#FF7CCB", "#FDFF8C"))
 }
 
+func getDiskTableColumns() []table.Column {
+	return []table.Column{
+		{Title: "Device", Width: 20},
+		{Title: "Mount", Width: 40},
+		{Title: "FS", Width: 10},
+		{Title: "Used", Width: 10},
+		{Title: "Total", Width: 10},
+		{Title: "Free", Width: 10},
+	}
+}
+
+func getDiskTableRows(diskMetrics DiskMetrics) []table.Row {
+	var diskTableRow []table.Row
+
+	for _, disk := range diskMetrics.mountedPartitions {
+		diskTableRow = append(diskTableRow, table.Row{
+			disk.devName, disk.mountPoint, disk.fsType, strconv.FormatInt(int64(disk.usedDisk/(1024*1024)), 10) + "M", strconv.FormatInt(int64(disk.totalDisk/(1024*1024)), 10) + "M", strconv.FormatInt(int64(disk.freeDisk/(1024*1024)), 10) + "M",
+		})
+	}
+
+	return diskTableRow
+}
+
 func initialModel() model {
 	initCpu, err := GetCPUMetrics()
 	if err != nil {
@@ -139,11 +182,25 @@ func initialModel() model {
 
 	memProgress := NewProgress()
 
-	GetDiskMetrics()
+	initDisk, err := GetDiskMetrics()
+	if err != nil {
+		log.Fatal("There was some error getting disk metrics: ", err)
+	}
+
+	t := table.New(
+		table.WithColumns(getDiskTableColumns()),
+		table.WithRows(getDiskTableRows(initDisk)),
+		table.WithHeight(len(initDisk.mountedPartitions)+1),
+		table.WithStyles(table.Styles{
+			Header: lipgloss.NewStyle().Bold(true),
+		}),
+	)
+
 	return model{
-		sys:         SystemMetrics{cpu: initCpu, memory: initMem},
+		sys:         SystemMetrics{cpu: initCpu, memory: initMem, disk: initDisk},
 		cpuProgress: cpuProgress,
 		memProgress: memProgress,
+		diskTable:   t,
 	}
 }
 
@@ -175,8 +232,15 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if err != nil {
 			log.Fatal("There was some error getting memory metrics: ", err)
 		}
+
+		disk, err := GetDiskMetrics()
+		if err != nil {
+			log.Fatal("There was some error getting disk metrics: ", err)
+		}
+
 		m.sys.cpu = cpu
 		m.sys.memory = mem
+		m.sys.disk = disk
 		return m, doTick()
 	}
 
@@ -186,26 +250,31 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (m model) View() string {
-
-	s := "System Monitor\n\n"
-	s += CPU_TITLE + "\n"
-	s += strings.Repeat("#", len(CPU_TITLE))
-	s += "\n\n"
-	s += fmt.Sprintf("Model Name: %s\n", m.sys.cpu.modelName)
-	s += fmt.Sprintf("Frequency: %.2fMHz\n", m.sys.cpu.frequency)
-	s += fmt.Sprintf("Total CPU: %d (%d Logical)\n", m.sys.cpu.totalCPU, m.sys.cpu.logicalCPU)
+	var s strings.Builder
+	s.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color("#FDFF8C")).Render(TITLE))
+	s.WriteString("\n\n")
+	s.WriteString(boldPinkStyle.Render(CPU_TITLE) + "\n")
+	s.WriteString(boldPinkStyle.Render(strings.Repeat("#", len(CPU_TITLE))) + "\n")
+	s.WriteString(fmt.Sprintf("Model Name: %s\n", m.sys.cpu.modelName))
+	s.WriteString(fmt.Sprintf("Frequency: %.2fMHz\n", m.sys.cpu.frequency))
+	s.WriteString(fmt.Sprintf("Total CPU: %d (%d Logical)\n", m.sys.cpu.totalCPU, m.sys.cpu.logicalCPU))
 
 	for i, per := range m.sys.cpu.percentUsage {
-		s += fmt.Sprintf("\nCPU %d: ", i+1) + m.cpuProgress[i].ViewAs(per/100)
+		s.WriteString(fmt.Sprintf("\nCPU %d: ", i+1) + m.cpuProgress[i].ViewAs(per/100))
 	}
 
-	s += "\n\n"
-	s += MEM_TITLE + "\n"
-	s += strings.Repeat("#", len(MEM_TITLE))
-	s += "\n\n"
-	s += fmt.Sprintf("Used %d bytes (of %d bytes)\n\n", m.sys.memory.memoryUsed, m.sys.memory.memoryTotal)
-	s += m.memProgress.ViewAs(float64(m.sys.memory.memoryUsed) / float64(m.sys.memory.memoryTotal))
-	return s
+	s.WriteString("\n\n")
+	s.WriteString(boldPinkStyle.Render(MEM_TITLE) + "\n")
+	s.WriteString(boldPinkStyle.Render(strings.Repeat("#", len(MEM_TITLE))) + "\n")
+	s.WriteString(fmt.Sprintf("Used %d bytes (of %d bytes)\n\n", m.sys.memory.memoryUsed, m.sys.memory.memoryTotal))
+	s.WriteString(m.memProgress.ViewAs(float64(m.sys.memory.memoryUsed) / float64(m.sys.memory.memoryTotal)))
+
+	s.WriteString("\n\n")
+	s.WriteString(boldPinkStyle.Render(DISK_TITLE) + "\n")
+	s.WriteString(boldPinkStyle.Render(strings.Repeat("#", len(DISK_TITLE))) + "\n")
+
+	s.WriteString(baseStyle.Render(m.diskTable.View()))
+	return s.String()
 }
 
 func main() {
