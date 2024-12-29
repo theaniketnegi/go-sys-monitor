@@ -151,12 +151,27 @@ func getDiskTableColumns() []table.Column {
 	}
 }
 
+func convertSize(size uint64) string {
+	var conv uint64
+	var res string
+
+	conv = size / (1024 * 1024)
+	if conv >= 1024 {
+		conv /= 1024
+		res = strconv.FormatUint(conv, 10) + "G"
+	} else {
+		res = strconv.FormatUint(conv, 10) + "M"
+	}
+
+	return res
+}
+
 func getDiskTableRows(diskMetrics DiskMetrics) []table.Row {
 	var diskTableRow []table.Row
 
 	for _, disk := range diskMetrics.mountedPartitions {
 		diskTableRow = append(diskTableRow, table.Row{
-			disk.devName, disk.mountPoint, disk.fsType, strconv.FormatInt(int64(disk.usedDisk/(1024*1024)), 10) + "M", strconv.FormatInt(int64(disk.totalDisk/(1024*1024)), 10) + "M", strconv.FormatInt(int64(disk.freeDisk/(1024*1024)), 10) + "M",
+			disk.devName, disk.mountPoint, disk.fsType, convertSize(disk.usedDisk), convertSize(disk.totalDisk), convertSize(disk.freeDisk),
 		})
 	}
 
@@ -238,6 +253,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			log.Fatal("There was some error getting disk metrics: ", err)
 		}
 
+		m.diskTable.SetRows(getDiskTableRows(disk))
+		m.diskTable.SetHeight(len(disk.mountedPartitions) + 1)
 		m.sys.cpu = cpu
 		m.sys.memory = mem
 		m.sys.disk = disk
